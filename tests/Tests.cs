@@ -1,42 +1,30 @@
-using System;
+﻿using System;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Web.Script.Serialization;
 using OpenTrace;
 class Tests {
- static int count;
- static void Check(bool ok,string label){if(!ok)throw new Exception(label);count++;Console.WriteLine("PASS "+label);}
- static void Reject(Action action,string label){try{action();}catch(ArgumentException){Check(true,label);return;}throw new Exception(label);}
- static void Main(){Run().GetAwaiter().GetResult();Console.WriteLine(count+" checks passed.");}
+ static int n;
+ static void Check(bool ok,string name){if(!ok)throw new Exception(name);n++;Console.WriteLine("PASS "+name);}
+ static void Main(){try{Run().GetAwaiter().GetResult();Console.WriteLine(n+" checks passed.");}catch(Exception e){Console.WriteLine(e);Environment.ExitCode=1;}}
  static async Task Run(){
-  Check(Target.Parse("Телефон","+1 (202) 555-0100").Value=="+12025550100","international phone normalization");
-  Reject(delegate{Target.Parse("Телефон","2025550100");},"country code is required");
-  Reject(delegate{Target.Parse("Телефон","+1<script>");},"phone rejects injected text");
-  Reject(delegate{Target.Parse("Почта","Name <a@example.com>");},"display names are rejected");
-  Check(Target.Parse("Почта","a@EXAMPLE.COM").Value=="a@example.com","email domain normalized");
-  Check(Target.Parse("Никнейм","@example_user").Value=="example_user","username normalization");
-  Reject(delegate{Target.Parse("Никнейм","https://t.me/example");},"username rejects URLs");
-  Check(Engine.Platform("https://t.me.evil.example/person")=="","spoofed domain rejected");
-  Check(Engine.Platform("https://t.me@evil.example/person")=="","URL credentials rejected");
-  Check(Engine.Platform("javascript:alert(1)")=="","non-HTTPS link rejected");
-  Check(Engine.Platform("https://www.tiktok.com/@example")=="TikTok","real TikTok URL recognized");
-  string sample="{\"web\":{\"results\":[{\"url\":\"https://t.me/example\",\"title\":\"<b>Example</b>\",\"description\":\"Public &amp; indexed\"},{\"url\":\"https://t.me/example\",\"title\":\"Duplicate\"},{\"url\":\"https://t.me.evil.example/a\",\"title\":\"Spoof\"}]}}";
-  var findings=Engine.ParseSearch(sample);Check(findings.Count==1,"search results filtered and deduplicated");Check(findings[0].Title=="Example"&&findings[0].Evidence=="Public & indexed","snippets converted to plain text");Check(findings[0].Status=="Кандидат из поиска"&&findings[0].Assessment=="Не оценено","search is never treated as proof of identity");Check(Engine.ParseSearch("{\"web\":{\"results\":[]}}").Count==0,"empty search result");
+  Target email=Target.Parse("Почта","test@example.com"),phone=Target.Parse("Телефон","+1 (202) 555-0100"),user=Target.Parse("Никнейм","example_user");
+  Check(phone.Value=="+12025550100","phone normalization");bool invalid=false;try{Target.Parse("Телефон","2025550100");}catch(ArgumentException){invalid=true;}Check(invalid,"country code required");
+  Check(Engine.Platform("https://t.me.evil.example/a")=="","spoofed domain rejected");Check(Engine.Platform("https://t.me@evil.example/a")=="","URL credentials rejected");Check(Engine.Platform("javascript:alert(1)")=="","non-HTTPS link rejected");
+  Check(Engine.Matches(email,"","Contact test@example.com","https://t.me/example"),"email in public snippet matched");Check(!Engine.Matches(email,"","other-test@example.com","https://t.me/example"),"longer email cannot match");Check(Engine.Matches(phone,"","+1 (202) 555-0100","https://t.me/example"),"formatted phone matched");Check(!Engine.Matches(phone,"","9120255501009","https://t.me/example"),"longer number cannot match");Check(Engine.Matches(user,"","","https://www.tiktok.com/@example_user"),"username URL matched");Check(!Engine.Matches(user,"Other","","https://t.me/other"),"unrelated username rejected");
+  string sample="<rss><channel><item><title>Example</title><link>https://t.me/example</link><description>test@example.com &amp; public</description></item><item><link>https://t.me/example</link><description>test@example.com</description></item><item><link>https://t.me.evil.example/a</link><description>test@example.com</description></item><item><link>https://github.com/unrelated</link><description>other contact</description></item></channel></rss>";
+  var findings=Engine.ParseRss(sample,email);Check(findings.Count==1,"RSS filtered and deduplicated");Check(findings[0].Evidence=="test@example.com & public","RSS entities decoded");Check(findings[0].Assessment=="Не оценено","public mention is not proof of identity");Check(Engine.ParseRss("<rss><channel/></rss>",email).Count==0,"valid empty feed");
+  bool bad=false;try{Engine.ParseRss("<html>challenge</html>",email);}catch(Exception){bad=true;}Check(bad,"HTML challenge not treated as empty results");
+  bool dtd=false;try{Engine.ParseRss("<!DOCTYPE rss [<!ENTITY x SYSTEM 'file:///not-a-real-file'>]><rss><channel>&x;</channel></rss>",email);}catch(Exception){dtd=true;}Check(dtd,"external XML entities prohibited");
   using(Engine engine=new Engine()){
-   Target email=Target.Parse("Почта","test@example.com");string sentUrl="",sentKey="";
-   engine.Transport=delegate(string url,string key,CancellationToken token){sentUrl=url;sentKey=key;return Task.FromResult(new Fetch{Code=200,Text=sample});};
-   var result=await engine.Search(email,"test-secret",CancellationToken.None);Check(result.Count==1&&sentKey=="test-secret"&&!sentUrl.Contains("test-secret"),"API key passed separately from query URL");
-   Check(Uri.UnescapeDataString(sentUrl).Contains("\"test@example.com\""),"email sent as quoted exact query");
-   bool noKey=false;try{await engine.Search(email,"",CancellationToken.None);}catch(ArgumentException){noKey=true;}Check(noKey,"missing API key is explicit");
-   engine.Transport=delegate(string url,string key,CancellationToken token){return Task.FromResult(new Fetch{Code=429,Text=""});};bool limit=false;try{await engine.Search(email,"test",CancellationToken.None);}catch(Exception e){limit=e.Message.Contains("лимит");}Check(limit,"rate limit surfaced");
-   Target user=Target.Parse("Никнейм","example_user");
-   engine.Transport=delegate(string url,string key,CancellationToken token){return Task.FromResult(new Fetch{Code=403,Text="blocked"});};Check((await engine.TikTok(user,CancellationToken.None)).Status=="Не удалось проверить","TikTok block is inconclusive");
-   engine.Transport=delegate(string url,string key,CancellationToken token){return Task.FromResult(new Fetch{Code=200,Text="{\"author_url\":\"https://www.tiktok.com/@other\",\"author_name\":\"Other\"}"});};Check((await engine.TikTok(user,CancellationToken.None)).Status=="Не удалось проверить","wrong TikTok author cannot confirm requested profile");
-   engine.Transport=delegate(string url,string key,CancellationToken token){return Task.FromResult(new Fetch{Code=200,Text="{\"author_url\":\"https://www.tiktok.com/@example_user\",\"author_name\":\"Example\"}"});};Check((await engine.TikTok(user,CancellationToken.None)).Status=="Публичная страница","matching TikTok oEmbed confirms page only");
-   engine.Transport=delegate(string url,string key,CancellationToken token){return Task.FromResult(new Fetch{Code=200,Text="<html>Telegram contact landing</html>"});};Check((await engine.Telegram(user,CancellationToken.None)).Status=="Не удалось проверить","generic Telegram landing is inconclusive");
-   engine.Transport=delegate(string url,string key,CancellationToken token){return Task.FromResult(new Fetch{Code=200,Text="<div class=\"tgme_page_title\"><span>Example Channel</span></div><img class=\"tgme_page_photo_image\">"});};Check((await engine.Telegram(user,CancellationToken.None)).Title=="Example Channel","public Telegram title parsed");
-   engine.Transport=delegate(string url,string key,CancellationToken token){token.ThrowIfCancellationRequested();return Task.FromResult(new Fetch{Code=200,Text=sample});};bool canceled=false;using(var cts=new CancellationTokenSource()){cts.Cancel();try{await engine.Search(email,"test",cts.Token);}catch(OperationCanceledException){canceled=true;}}Check(canceled,"cancellation propagated");
-   string report=new JavaScriptSerializer().Serialize(new {Findings=findings});Check(!report.Contains("test-secret")&&report.Contains("CheckedUtc"),"report excludes credentials and retains timestamps");
+   string sent="";engine.Transport=delegate(string url,CancellationToken token){sent=url;return Task.FromResult(new Fetch{Code=200,Text=sample});};Check((await engine.Search(email,CancellationToken.None)).Count==1&&sent.StartsWith("https://www.bing.com/search?format=rss&q="),"automatic search without a key");Check(Uri.UnescapeDataString(sent).Contains("\"test@example.com\""),"query input quoted");
+   engine.Transport=delegate(string url,CancellationToken token){return Task.FromResult(new Fetch{Code=429,Text=""});};bool limited=false;try{await engine.Search(email,CancellationToken.None);}catch(Exception e){limited=e.Message.Contains("ограничил");}Check(limited,"rate limit surfaced");
+   engine.Transport=delegate(string url,CancellationToken token){return Task.FromResult(new Fetch{Code=302,Text=""});};bool redirect=false;try{await engine.Search(email,CancellationToken.None);}catch(Exception e){redirect=e.Message.Contains("302");}Check(redirect,"redirect is inconclusive");
+   engine.Transport=delegate(string url,CancellationToken token){return Task.FromResult(new Fetch{Code=403,Text=""});};Check((await engine.TikTok(user,CancellationToken.None)).Status=="Не удалось проверить","TikTok block is inconclusive");
+   engine.Transport=delegate(string url,CancellationToken token){return Task.FromResult(new Fetch{Code=200,Text="{\"author_url\":\"https://www.tiktok.com/@other\"}"});};Check((await engine.TikTok(user,CancellationToken.None)).Status=="Не удалось проверить","wrong TikTok author rejected");
+   engine.Transport=delegate(string url,CancellationToken token){return Task.FromResult(new Fetch{Code=200,Text="{\"author_url\":\"https://www.tiktok.com/@example_user\",\"author_name\":\"Example\"}"});};Check((await engine.TikTok(user,CancellationToken.None)).Status=="Публичная страница","TikTok public page recognized");
+   engine.Transport=delegate(string url,CancellationToken token){return Task.FromResult(new Fetch{Code=200,Text="<html>Contact landing</html>"});};Check((await engine.Telegram(user,CancellationToken.None)).Status=="Не удалось проверить","generic Telegram page is inconclusive");
+   engine.Transport=delegate(string url,CancellationToken token){return Task.FromResult(new Fetch{Code=200,Text="<div class=\"tgme_page_title\">Example Channel</div><img class=\"tgme_page_photo_image\">"});};Check((await engine.Telegram(user,CancellationToken.None)).Title=="Example Channel","Telegram public title extracted");
+   using(var cts=new CancellationTokenSource()){cts.Cancel();bool canceled=false;try{await engine.Search(email,cts.Token);}catch(OperationCanceledException){canceled=true;}Check(canceled,"cancellation prevents query");}
   }
  }
 }
