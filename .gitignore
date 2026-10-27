@@ -1,0 +1,8 @@
+dist/
+*.user
+*.suo
+.vs/
+.env
+opentrace-report-*.json
+reports/
+*.key
